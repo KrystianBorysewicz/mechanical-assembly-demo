@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mechanical Assembly Demo</title>
+<style>
+  :root {
+    --panel-bg: rgba(18, 22, 28, 0.82);
+    --panel-border: rgba(255, 255, 255, 0.10);
+    --accent: #6cc8ff;
+    --text: #e8edf2;
+    --muted: #9aa6b2;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e13; }
+  body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: var(--text); }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; touch-action: none; }
+
+  .panel {
+    position: fixed;
+    backdrop-filter: blur(10px);
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 14px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.45);
+  }
+
+  #help {
+    top: 18px; left: 18px; max-width: 320px; padding: 16px 18px;
+  }
+  #help h1 { margin: 0 0 6px; font-size: 16px; letter-spacing: .3px; }
+  #help p { margin: 8px 0 0; font-size: 13px; line-height: 1.5; color: var(--muted); }
+  #help ol { margin: 10px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.55; color: var(--muted); }
+  #help ol b { color: var(--text); font-weight: 600; }
+  #help .kbd { color: var(--accent); font-weight: 600; }
+
+  #status {
+    bottom: 18px; left: 50%; transform: translateX(-50%);
+    padding: 10px 18px; font-size: 13.5px; letter-spacing: .2px;
+    display: flex; align-items: center; gap: 10px; white-space: nowrap;
+    transition: opacity .3s ease;
+  }
+  #status .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 0 rgba(108,200,255,.5); }
+  #status.ready .dot { background: #7CFFB2; animation: pulse 1.1s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(124,255,178,.6);} 70%{ box-shadow: 0 0 0 10px rgba(124,255,178,0);} 100%{box-shadow:0 0 0 0 rgba(124,255,178,0);} }
+
+  #controls { top: 18px; right: 18px; padding: 10px; display: flex; gap: 8px; }
+  #controls button {
+    appearance: none; border: 1px solid var(--panel-border); color: var(--text);
+    background: rgba(255,255,255,0.05); padding: 8px 14px; font-size: 13px;
+    border-radius: 9px; cursor: pointer; transition: background .15s, transform .05s;
+    font-family: inherit;
+  }
+  #controls button:hover { background: rgba(108,200,255,0.16); border-color: rgba(108,200,255,0.4); }
+  #controls button:active { transform: translateY(1px); }
+
+  #overlay {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 16px; background: #0b0e13; z-index: 20; transition: opacity .5s ease;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  .spinner { width: 42px; height: 42px; border-radius: 50%; border: 3px solid rgba(255,255,255,0.15); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #overlay .msg { color: var(--muted); font-size: 14px; max-width: 460px; text-align: center; line-height: 1.6; padding: 0 20px; }
+  #overlay .msg code { color: var(--accent); background: rgba(108,200,255,0.10); padding: 2px 6px; border-radius: 6px; }
+  #overlay.error .spinner { display: none; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="help" class="panel">
+  <h1>🔧 Mechanical Assembly Demo</h1>
+  <ol>
+    <li><b>Drag</b> a part so it overlaps its glowing ghost target.</li>
+    <li><b>Release</b> while it covers the target — it snaps above, then <b>screws</b> down into place (2 turns, ~3s).</li>
+    <li><b>Click</b> an assembled part to <b>unscrew</b> it and send it back.</li>
+  </ol>
+  <p><span class="kbd">Orbit:</span> drag empty space &nbsp;·&nbsp; <span class="kbd">Zoom:</span> scroll</p>
+</div>
+
+<div id="controls" class="panel">
+  <button id="btnAssemble">Assemble all</button>
+  <button id="btnReset">Reset</button>
+</div>
+
+<div id="status" class="panel"><span class="dot"></span><span id="statusText">Loading…</span></div>
+
+<div id="overlay">
+  <div class="spinner"></div>
+  <div class="msg" id="overlayMsg">Loading parts…</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// ------------------------------------------------------------------
+// Constants (file units: 1 unit = 2.54 cm, per FBX UnitScaleFactor)
+// ------------------------------------------------------------------
+const CM_PER_UNIT   = 2.54;
+const LIFT          = 30 / CM_PER_UNIT;   // "30 cm above" the assembled spot ≈ 11.81 units
+const SCREW_DUR     = 3.0;                // seconds for the 720° screw / unscrew
+const ALIGN_DUR     = 0.4;                // quick snap up to the hover point
+const RETURN_DUR    = 1.1;                // glide back to the staging row
+const TURNS         = 2;                  // 720° = 2 full turns
+const SPIN          = TURNS * Math.PI * 2;
+const FIXED_PART_INDEX = 0;               // this part starts pre-assembled and locked (non-interactive)
+const PART_COLORS   = [0xB4C0CC, 0xC98A45, 0xE3C567]; // steel / copper / brass
+
+// ------------------------------------------------------------------
+// Scene setup
+// ------------------------------------------------------------------
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+app.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0e13);
+
+const camera = new THREE.PerspectiveCamera(45, (window.innerWidth / window.innerHeight) || 1, 0.1, 5000);
+
+// Environment reflections for the metallic parts
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+// Lights
+const hemi = new THREE.HemisphereLight(0xdfefff, 0x20242c, 0.9);
+scene.add(hemi);
+const key = new THREE.DirectionalLight(0xffffff, 2.1);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.bias = -0.0005;
+scene.add(key);
+const fill = new THREE.DirectionalLight(0x9fc3ff, 0.5);
+scene.add(fill);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+// ------------------------------------------------------------------
+// UI refs
+// ------------------------------------------------------------------
+const overlay = document.getElementById('overlay');
+const overlayMsg = document.getElementById('overlayMsg');
+const statusBar = document.getElementById('status');
+const statusText = document.getElementById('statusText');
+document.getElementById('btnReset').addEventListener('click', resetAll);
+document.getElementById('btnAssemble').addEventListener('click', assembleAll);
+
+function setStatus(text, ready = false) {
+  statusText.textContent = text;
+  statusBar.classList.toggle('ready', ready);
+}
+
+// ------------------------------------------------------------------
+// Load the FBX
+// ------------------------------------------------------------------
+const carriers = [];          // one Group per part, origin = part centre
+const pickables = [];         // meshes the raycaster tests against
+let groundY = 0;
+
+new FBXLoader().load('parts.fbx', onLoaded, onProgress, onError);
+
+function onProgress(e) {
+  if (e.lengthComputable) {
+    overlayMsg.textContent = `Loading parts… ${Math.round((e.loaded / e.total) * 100)}%`;
+  }
+}
+
+function onError(err) {
+  console.error(err);
+  overlay.classList.add('error');
+  overlayMsg.innerHTML =
+    'Could not load <code>parts.fbx</code>.<br><br>' +
+    'Browsers block file access when a page is opened directly (<code>file://</code>).<br>' +
+    'Serve this folder over HTTP, e.g. run<br><code>py -m http.server 8000</code><br>' +
+    'in this folder, then open <code>http://localhost:8000/</code>.';
+}
+
+function onLoaded(root) {
+  root.updateMatrixWorld(true);
+
+  // Each top-level child that contains geometry is one assembly part.
+  const partObjects = root.children.filter(c => {
+    let hasMesh = false;
+    c.traverse(o => { if (o.isMesh) hasMesh = true; });
+    return hasMesh;
+  });
+
+  partObjects.forEach((partObj, i) => {
+    partObj.updateMatrixWorld(true);
+
+    // Give it a clean metallic look + shadows.
+    const color = PART_COLORS[i % PART_COLORS.length];
+    partObj.traverse(o => {
+      if (o.isMesh) {
+        o.material = new THREE.MeshStandardMaterial({ color, metalness: 0.85, roughness: 0.34 });
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
+    });
+
+    // Carrier group whose origin sits at the part's centre, so the screw
+    // rotation spins about the part's own vertical axis (no wobble/orbit).
+    const box = new THREE.Box3().setFromObject(partObj);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+
+    const carrier = new THREE.Group();
+    carrier.userData.isCarrier = true;
+    carrier.position.copy(center);
+    scene.add(carrier);
+    carrier.attach(partObj);          // reparent, preserving world transform
+
+    const locked = (i === FIXED_PART_INDEX);
+
+    // A translucent "ghost" marks each movable part's assembled target. The
+    // locked part is already sitting there, so it gets no ghost.
+    let ghost = null;
+    if (!locked) {
+      ghost = carrier.clone(true);
+      ghost.traverse(o => {
+        if (o.isMesh) {
+          o.material = new THREE.MeshStandardMaterial({
+            color, transparent: true, opacity: 0.14,
+            metalness: 0.0, roughness: 1.0,
+            emissive: new THREE.Color(color), emissiveIntensity: 0.0,
+            depthWrite: false, side: THREE.DoubleSide
+          });
+          o.castShadow = false; o.receiveShadow = false;
+        }
+      });
+      ghost.position.copy(center);    // static, stays at the assembled spot
+      scene.add(ghost);
+    }
+
+    carrier.userData = {
+      isCarrier: true,
+      index: i,
+      locked,
+      assembledPos: center.clone(),
+      hoverPos: center.clone().add(new THREE.Vector3(0, LIFT, 0)),
+      stagingPos: center.clone(),      // overwritten for movable parts below
+      radius: size.length() / 2,
+      halfHeight: size.y / 2,
+      halfDepth: Math.max(size.x, size.z) / 2,
+      state: locked ? 'assembled' : 'detached',  // locked part is permanently in place
+      anim: null,
+      ghost,
+      ghostMeshes: [],
+    };
+
+    if (!locked) {
+      ghost.traverse(o => { if (o.isMesh) carrier.userData.ghostMeshes.push(o); });
+      carrier.traverse(o => { if (o.isMesh) pickables.push(o); }); // only movable parts are grabbable
+    }
+    carriers.push(carrier);
+  });
+
+  layoutAndFrame();
+  overlay.classList.add('hidden');
+  setStatus('Drag a part to its glowing target', false);
+
+  // Optional handle for driving the demo from the browser console, e.g.
+  // __demo.assembleAll() / __demo.resetAll().
+  window.__demo = { THREE, scene, camera, controls, renderer, carriers, assembleAll, resetAll, startScrewIn, startReverse };
+}
+
+// ------------------------------------------------------------------
+// Initial staging layout + camera framing
+// ------------------------------------------------------------------
+function layoutAndFrame() {
+  // Assembled bounding box (parts are still in assembled pose here).
+  const assembly = new THREE.Box3();
+  carriers.forEach(c => assembly.expandByObject(c));
+  const aCenter = assembly.getCenter(new THREE.Vector3());
+  const aSize = assembly.getSize(new THREE.Vector3());
+  groundY = assembly.min.y;
+
+  // Only movable parts are spread into the staging row; the locked part is left
+  // sitting in its assembled position.
+  const movable = carriers.filter(c => !c.userData.locked);
+  const spacing = Math.max(...movable.map(c => c.userData.halfDepth * 2)) * 1.4;
+  const rowZ = assembly.max.z + Math.max(aSize.z, spacing) * 1.5; // in front, toward camera
+  const startX = aCenter.x - spacing * (movable.length - 1) / 2;
+
+  movable.forEach((c, i) => {
+    const staging = new THREE.Vector3(
+      startX + i * spacing,
+      groundY + c.userData.halfHeight,
+      rowZ
+    );
+    c.userData.stagingPos.copy(staging);
+    c.position.copy(staging);
+    c.rotation.set(0, 0, 0);
+    c.userData.state = 'detached';
+  });
+
+  // Ground grid at the base of the assembly.
+  const gridSpan = Math.max(aSize.x, aSize.z, rowZ - assembly.min.z) * 4;
+  const grid = new THREE.GridHelper(gridSpan, 40, 0x2a3340, 0x171c24);
+  grid.position.set(aCenter.x, groundY - 0.02, (aCenter.z + rowZ) / 2);
+  scene.add(grid);
+
+  // Soft shadow-catcher plane.
+  const shadowMat = new THREE.ShadowMaterial({ opacity: 0.28 });
+  const shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(gridSpan, gridSpan), shadowMat);
+  shadowPlane.rotation.x = -Math.PI / 2;
+  shadowPlane.position.set(aCenter.x, groundY - 0.01, (aCenter.z + rowZ) / 2);
+  shadowPlane.receiveShadow = true;
+  scene.add(shadowPlane);
+
+  // Frame both the assembly and the staging row.
+  const full = new THREE.Box3();
+  carriers.forEach(c => {
+    const r = c.userData.radius;
+    full.expandByPoint(c.userData.assembledPos.clone().addScalar(r));
+    full.expandByPoint(c.userData.assembledPos.clone().addScalar(-r));
+    full.expandByPoint(c.userData.stagingPos.clone().addScalar(r));
+    full.expandByPoint(c.userData.stagingPos.clone().addScalar(-r));
+  });
+  full.expandByPoint(new THREE.Vector3(aCenter.x, aCenter.y + LIFT * 1.4, aCenter.z));
+  const fCenter = full.getCenter(new THREE.Vector3());
+  const fRadius = full.getBoundingSphere(new THREE.Sphere()).radius;
+
+  const dir = new THREE.Vector3(0.75, 0.55, 1.3).normalize();
+  // Fit the bounding sphere to whichever FOV is tighter — vertical, or the
+  // horizontal FOV on narrow/portrait viewports — so nothing clips on load.
+  const vFov = THREE.MathUtils.degToRad(camera.fov);
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  const dist = (fRadius / Math.sin(Math.min(vFov, hFov) / 2)) * 1.15;
+  camera.position.copy(fCenter).addScaledVector(dir, dist);
+  camera.near = dist / 100;
+  camera.far = dist * 100;
+  camera.updateProjectionMatrix();
+  controls.target.copy(fCenter);
+  controls.update();
+
+  // Position the key light relative to scene scale.
+  key.position.set(fCenter.x + fRadius, fCenter.y + fRadius * 1.5, fCenter.z + fRadius);
+  key.target.position.copy(fCenter);
+  key.target.updateMatrixWorld();
+  scene.add(key.target);
+  const s = fRadius * 1.6;
+  Object.assign(key.shadow.camera, { left: -s, right: s, top: s, bottom: -s, near: 0.1, far: dist * 4 });
+  key.shadow.camera.updateProjectionMatrix();
+  fill.position.set(fCenter.x - fRadius, fCenter.y + fRadius, fCenter.z - fRadius);
+  fill.target.position.copy(fCenter);
+  fill.target.updateMatrixWorld();
+  scene.add(fill.target);
+}
+
+// ------------------------------------------------------------------
+// Interaction: drag to place, click to remove
+// ------------------------------------------------------------------
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+const dragPlane = new THREE.Plane();
+const planeHit = new THREE.Vector3();
+const grabOffset = new THREE.Vector3();
+const _n = new THREE.Vector3();
+const _proj = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _sc = { x: 0, y: 0, z: 0 }, _sa = { x: 0, y: 0, z: 0 }, _se = { x: 0, y: 0, z: 0 };
+let dragging = null;
+let pendingClick = null;                 // a possible click-to-unscrew on an assembled part
+const CLICK_MOVE_TOL = 6;                // px of motion that turns a "click" into an orbit
+
+function updatePointer(e) {
+  pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+  pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+}
+
+function getCarrier(obj) {
+  while (obj && !obj.userData.isCarrier) obj = obj.parent;
+  return obj;
+}
+
+// World point -> screen pixels (out.z < 1 means it's in front of the camera).
+function toScreen(vec, out) {
+  _proj.copy(vec).project(camera);
+  out.x = (_proj.x * 0.5 + 0.5) * window.innerWidth;
+  out.y = (-_proj.y * 0.5 + 0.5) * window.innerHeight;
+  out.z = _proj.z;
+  return out;
+}
+
+// Snap is tested in SCREEN space — the part assembles when it visually overlaps
+// its ghost, from ANY camera angle. (A camera-facing drag can't change the part's
+// view-depth, so a 3D-distance test to a target at a different depth is unreachable;
+// the align animation reconciles the real 3D position after the snap fires.)
+function isOverTarget(carrier) {
+  toScreen(carrier.position, _sc);
+  toScreen(carrier.userData.assembledPos, _sa);
+  if (_sa.z > 1) return false;           // target is behind the camera
+  const pxDist = Math.hypot(_sc.x - _sa.x, _sc.y - _sa.y);
+  // On-screen radius of the part at its target, so the catch zone tracks zoom.
+  _right.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+  toScreen(_n.copy(carrier.userData.assembledPos).addScaledVector(_right, carrier.userData.radius), _se);
+  const pxRadius = Math.hypot(_se.x - _sa.x, _se.y - _sa.y);
+  return pxDist < Math.max(pxRadius * 1.15, 45);
+}
+
+function onPointerDown(e) {
+  if (e.button !== 0) return;
+  updatePointer(e);
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(pickables, false);
+  if (!hits.length) return;
+  const carrier = getCarrier(hits[0].object);
+  if (!carrier) return;
+
+  if (carrier.userData.state === 'assembled') {
+    // Defer the decision: a clean click unscrews it; a drag orbits the camera.
+    pendingClick = { carrier, x: e.clientX, y: e.clientY };
+  } else if (carrier.userData.state === 'detached') {
+    beginDrag(carrier, e);               // grab & drag
+  }
+  // parts mid-animation ignore input
+}
+
+function beginDrag(carrier, e) {
+  dragging = carrier;
+  controls.enabled = false;
+  renderer.domElement.setPointerCapture?.(e.pointerId);
+  // Drag on a plane facing the camera, through the part's centre — the part
+  // tracks the cursor on screen; its true 3D depth is set by the align animation.
+  camera.getWorldDirection(_n);
+  dragPlane.setFromNormalAndCoplanarPoint(_n, carrier.position);
+  raycaster.setFromCamera(pointer, camera);
+  raycaster.ray.intersectPlane(dragPlane, planeHit);
+  grabOffset.copy(carrier.position).sub(planeHit);
+}
+
+function onPointerMove(e) {
+  if (dragging) {
+    updatePointer(e);
+    raycaster.setFromCamera(pointer, camera);
+    if (raycaster.ray.intersectPlane(dragPlane, planeHit)) {
+      dragging.position.copy(planeHit).add(grabOffset);
+    }
+    const near = isOverTarget(dragging);
+    highlightGhost(dragging, near);
+    setStatus(near ? 'Release to assemble ✓' : 'Move the part onto its target', near);
+  } else if (pendingClick) {
+    // Moved too far to be a click -> let it be an orbit instead.
+    if (Math.hypot(e.clientX - pendingClick.x, e.clientY - pendingClick.y) > CLICK_MOVE_TOL) {
+      pendingClick = null;
+    }
+  }
+}
+
+function onPointerUp(e) {
+  if (dragging) { endDrag(e, true); return; }
+  if (pendingClick) {
+    const c = pendingClick.carrier;
+    pendingClick = null;
+    if (c.userData.state === 'assembled') startReverse(c);   // clean click -> unscrew
+  }
+}
+
+// Shared drag teardown. snap=true runs the drop decision; snap=false (pointer
+// cancelled/lost) simply releases the part back toward its staging slot so it
+// can never get stuck to the cursor with OrbitControls left disabled.
+function endDrag(e, snap) {
+  const carrier = dragging;
+  if (!carrier) return;
+  dragging = null;
+  controls.enabled = true;
+  try { renderer.domElement.releasePointerCapture?.(e.pointerId); } catch (_) {}
+  highlightGhost(carrier, false);
+  if (snap && isOverTarget(carrier)) startScrewIn(carrier);
+  else startReturn(carrier);             // missed / cancelled -> glide back to the row
+}
+
+function highlightGhost(carrier, on) {
+  carrier.userData.ghostMeshes.forEach(m => {
+    m.material.emissiveIntensity = on ? 0.9 : 0.0;
+    m.material.opacity = on ? 0.30 : 0.14;
+  });
+}
+
+renderer.domElement.addEventListener('pointerdown', onPointerDown);
+window.addEventListener('pointermove', onPointerMove);
+window.addEventListener('pointerup', onPointerUp);
+window.addEventListener('pointercancel', e => { if (dragging) endDrag(e, false); });
+
+// ------------------------------------------------------------------
+// Animations (time-driven, updated each frame)
+// ------------------------------------------------------------------
+const clock = new THREE.Clock();
+
+const easeInOut = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const easeOut   = t => 1 - Math.pow(1 - t, 3);
+
+function startScrewIn(carrier) {
+  carrier.userData.state = 'assembling';
+  carrier.userData.anim = {
+    mode: 'align',
+    t: 0,
+    dur: ALIGN_DUR,
+    fromPos: carrier.position.clone(),
+    fromRotY: carrier.rotation.y,
+  };
+  setStatus('Screwing into place…', false);
+}
+
+function startReverse(carrier) {
+  carrier.userData.state = 'disassembling';
+  carrier.userData.anim = { mode: 'unscrew', t: 0, dur: SCREW_DUR };
+  setStatus('Unscrewing…', false);
+}
+
+// Missed drop (or a cancelled drag): glide the part back to its staging slot.
+function startReturn(carrier) {
+  carrier.userData.state = 'returning';
+  carrier.userData.anim = { mode: 'return', t: 0, dur: RETURN_DUR, fromPos: carrier.position.clone() };
+  setStatus('Drag a part to its glowing target', false);
+}
+
+function updateAnim(carrier, dt) {
+  const a = carrier.userData.anim;
+  if (!a) return;
+  const u = carrier.userData;
+  a.t = Math.min(1, a.t + dt / a.dur);
+
+  if (a.mode === 'align') {
+    const e = easeOut(a.t);
+    carrier.position.lerpVectors(a.fromPos, u.hoverPos, e);
+    carrier.rotation.y = a.fromRotY * (1 - e);
+    if (a.t >= 1) carrier.userData.anim = { mode: 'screw', t: 0, dur: SCREW_DUR };
+
+  } else if (a.mode === 'screw') {
+    const e = easeInOut(a.t);
+    carrier.position.set(u.assembledPos.x,
+      THREE.MathUtils.lerp(u.hoverPos.y, u.assembledPos.y, e), u.assembledPos.z);
+    carrier.rotation.y = -SPIN * e;                 // clockwise-from-top = screw in
+    if (a.t >= 1) {
+      carrier.position.copy(u.assembledPos);
+      carrier.rotation.y = 0;
+      carrier.userData.anim = null;
+      carrier.userData.state = 'assembled';
+      afterStateChange();
+    }
+
+  } else if (a.mode === 'unscrew') {
+    const e = easeInOut(a.t);
+    carrier.position.set(u.assembledPos.x,
+      THREE.MathUtils.lerp(u.assembledPos.y, u.hoverPos.y, e), u.assembledPos.z);
+    carrier.rotation.y = SPIN * e;                  // opposite direction
+    if (a.t >= 1) {
+      carrier.rotation.y = 0;
+      carrier.userData.anim = { mode: 'return', t: 0, dur: RETURN_DUR, fromPos: u.hoverPos.clone() };
+    }
+
+  } else if (a.mode === 'return') {
+    const e = easeInOut(a.t);
+    carrier.position.lerpVectors(a.fromPos, u.stagingPos, e);
+    if (a.t >= 1) {
+      carrier.position.copy(u.stagingPos);
+      carrier.rotation.set(0, 0, 0);
+      carrier.userData.anim = null;
+      carrier.userData.state = 'detached';
+      afterStateChange();
+    }
+  }
+}
+
+function afterStateChange() {
+  const movable = carriers.filter(c => !c.userData.locked);
+  const assembled = movable.filter(c => c.userData.state === 'assembled').length;
+  if (assembled === movable.length) setStatus('Fully assembled ✓ — click a part to remove it', true);
+  else if (assembled === 0) setStatus('Drag a part to its glowing target', false);
+  else setStatus(`${assembled} / ${movable.length} parts assembled`, false);
+}
+
+// ------------------------------------------------------------------
+// Buttons
+// ------------------------------------------------------------------
+function assembleAll() {
+  carriers.forEach(c => { if (c.userData.state === 'detached') startScrewIn(c); });
+}
+function resetAll() {
+  dragging = null;                        // drop any in-flight drag cleanly
+  pendingClick = null;
+  controls.enabled = true;
+  carriers.forEach(c => {
+    if (c.userData.locked) return;        // the fixed part stays assembled & in place
+    c.userData.anim = null;
+    c.userData.state = 'detached';
+    c.position.copy(c.userData.stagingPos);
+    c.rotation.set(0, 0, 0);
+    highlightGhost(c, false);
+  });
+  setStatus('Drag a part to its glowing target', false);
+}
+
+// ------------------------------------------------------------------
+// Render loop
+// ------------------------------------------------------------------
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  carriers.forEach(c => updateAnim(c, dt));
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+function resize() {
+  const w = window.innerWidth || app.clientWidth;
+  const h = window.innerHeight || app.clientHeight;
+  if (!w || !h) return;                 // ignore degenerate 0×0 measurements
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+resize();
+window.addEventListener('resize', resize);
+// Catches the case where the viewport reports 0×0 at init and is sized a
+// frame later (some embedded/preview contexts) — the observer fires on the
+// first real measurement.
+new ResizeObserver(resize).observe(document.documentElement);
+</script>
+</body>
+</html>
